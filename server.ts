@@ -64,26 +64,41 @@ app.post('/api/prepress/analyze-image', async (req: Request, res: Response): Pro
         ],
         format: {
           name: 'Media Carta (Apaisada)',
-          widthMm: 215,
-          heightMm: 140,
+          widthMm: 215.9,
+          heightMm: 139.7,
           orientation: 'horizontal',
-          confidence: 0.94,
+          confidence: 0.96,
         },
         documentType: 'nota_de_venta',
+        substrate: 'papel_comercial',
+        borderFrame: {
+          isOrthogonal: false,
+          deviationAngleDeg: 4.8,
+          detectedRect: { xMm: 8, yMm: 8, widthMm: 199.9, heightMm: 123.7 },
+        },
+        logoZone: { xMm: 14, yMm: 14, widthMm: 35, heightMm: 16 },
+        watermarkZone: { xMm: 60, yMm: 45, widthMm: 95, heightMm: 38 },
         specs: {
           hasFolio: true,
-          suggestedFolioBox: { xMm: 160, yMm: 18, widthMm: 45, heightMm: 16 },
+          suggestedFolioBox: { xMm: 160, yMm: 16, widthMm: 44, heightMm: 14 },
           rowCount: 8,
           rowSpacingMm: 8.5,
           hasWatermark: true,
           suggestedWatermarkOpacityPercent: 6,
           gripperMarginMm: 8,
           warningMessage:
-            'Taller pequeño detectado: Se sugiere mantener la marca de agua al 6% de tinta negra para evitar que empaste.',
+            'Aviso de Taller: Enderezado ortogonal a 90° listo. Tinta al 6% recomendada para marca de agua en offset.',
+        },
+        inkSeparationSuggestion: {
+          inkCount: 1,
+          inkNames: ['Black (Key)'],
+          underbaseNeeded: false,
+          meshRecommendation: 'Placa CTP térmica offset / Malla 120T serigrafía',
         },
         detectedFonts: [
-          { category: 'Sans-Serif Condensada', suggestedFont: 'Plus Jakarta Sans', useFor: 'Títulos y Rótulos' },
-          { category: 'Monoespaciada / Mecánica', suggestedFont: 'JetBrains Mono', useFor: 'Folio y Tabla' },
+          { category: 'Sans-Serif Geométrica', suggestedFont: 'Plus Jakarta Sans', useFor: 'Títulos y Membrete', fontFamilyMatch: 'Plus Jakarta Sans', grammaticalContext: 'Encabezado comercial', recommendedAdjustment: 'Bold 15pt' },
+          { category: 'Monoespaciada / Mecánica', suggestedFont: 'JetBrains Mono', useFor: 'Folio y Tabla', fontFamilyMatch: 'JetBrains Mono', grammaticalContext: 'Datos numéricos', recommendedAdjustment: 'Cifras tabulares fijas' },
+          { category: 'Serif Clásica', suggestedFont: 'Times New Roman', useFor: 'Pagaré Inferior', fontFamilyMatch: 'Times New Roman', grammaticalContext: 'Cláusula legal', recommendedAdjustment: 'Regular 7pt' },
         ],
         impositionSuggestion: {
           scheme: '2_en_carta',
@@ -100,21 +115,26 @@ app.post('/api/prepress/analyze-image', async (req: Request, res: Response): Pro
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
 
     const promptText = `
-Eres un Experto Maestro en Pre-Prensa e Imprenta Tradicional/Digital (Offset, Serigrafía, Flexo, Huecograbado).
-Analiza esta fotografía de una nota de venta, remisión, recibo o diseño para producción de imprenta.
-A menudo las fotos tomadas con celular presentan perspectiva oblicua (forma de trapecio). En la realidad, las imprentas utilizan formatos ortogonales estandarizados (media carta, medio oficio, carta, etc.).
+Eres un Arquitecto de Pre-Prensa y Maestro de Taller Gráfico de nivel producción.
+Tu misión es interpretar quirúrgicamente esta imagen/foto para convertirla en un formato de impresión vectorial perfecto y libre de defectos.
 
-Realiza las siguientes tareas de pre-prensa técnica:
-1. Detecta las 4 esquinas reales del papel en coordenadas normalizadas [0.0 a 1.0] (orden: [topLeft, topRight, bottomRight, bottomLeft]).
-2. Deduce el formato estándar de imprenta más probable (por ejemplo: "Media Carta" de 21.5 x 14.0 cm apaisada o vertical, "Medio Oficio" de 21.5 x 17.0 cm, "Carta" de 21.5 x 28.0 cm, "Cuarto de Carta" de 10.7 x 14.0 cm).
-3. Identifica si tiene recuadro para folio numerado, cantidad estimada de renglones y separación milimétrica entre renglones.
-4. Identifica si tiene o se beneficiaría de marca de agua central, y para el sistema "${printSystem}" recomienda el porcentaje exacto de tinta (ej. en offset 1 tinta negra se recomienda entre 4% y 7%; nunca más del 8% en prensas pequeñas de taller para evitar que empaste o manche).
-5. Detecta las FAMILIAS TIPOGRÁFICAS COMPLETAS (no letra por letra suelta) según la jerarquía y contexto gramatical del impreso:
-   - Familia de Titulares/Membrete (ej. Sans-Serif Neogrotesca / Geométrica como Helvetica, Plus Jakarta Sans, Futura).
-   - Familia de Cuerpo / Renglones / Columnas (ej. DIN, Monospaced o Sans humanista para datos legibles).
-   - Familia de Pagaré / Texto legal / Letra pequeña (ej. Serif clásica como Times New Roman o Garamond).
-   Explica claramente por qué se propone cada familia y qué ajuste de tamaño/peso previene emplastados.
-6. Recomienda el esquema de armado de imposición (ej. 2 notas en hoja Carta o 4 notas en Doble Carta/Tabloide).
+INSTRUCCIONES CLAVE DE PRE-PRENSA:
+1. DETECCIÓN DE ÁNGULOS RECTOS Y ENDEREZADO (90°):
+   - Los formatos de imprenta (Media Carta, Carta, Cuarto de Carta, Oficio, etc.) y sus marcos perimetrales e interiores son RIGUROSAMENTE ORTOGONALES con ángulos exactos de 90°.
+   - Si la imagen fue tomada con celular o cámara con perspectiva oblicua/trapezoidal, deduce que es una toma distorsionada. Localiza las 4 esquinas reales del papel/marco en coordenadas normalizadas [0.0 a 1.0] [topLeft, topRight, bottomRight, bottomLeft] tomando como referencia absoluta esos ángulos rectos de 90° para enderezarla.
+2. FORMATO EXACTO:
+   - Deduce si corresponde a: "Media Carta" (215.9 × 139.7 mm), "Cuarto de Carta" (107.9 × 139.7 mm), "Carta" (215.9 × 279.4 mm), "Medio Oficio" (215.9 × 170 mm), "Oficio" (215.9 × 340 mm), o "Formato Textil / Playera" (280 × 350 mm pecho).
+3. TRATAMIENTO DE LÍNEAS VS SÓLIDOS:
+   - Las líneas de tablas, renglones, marcos y guías NO deben ser polígonos rellenos; deben interpretarse como líneas CAD puras (strokes rectilíneos con grosor en mm/pt).
+   - Los logotipos, isotipos, sellos o marcas de agua deben ser interpretados como sólidos vectoriales limpios.
+4. DETECCIÓN DE ZONAS PARA SUSTITUCIÓN VECTORIAL:
+   - Identifica la zona aproximada en mm del logotipo de la empresa (logoZone: xMm, yMm, widthMm, heightMm).
+   - Identifica la zona de la marca de agua central si existe (watermarkZone: xMm, yMm, widthMm, heightMm).
+5. SUSTRATO Y SEPARACIÓN DE TINTAS:
+   - Evalúa si el diseño es para papel comercial (offset/tipografía) o para serigrafía textil (playera/algodón). Si es para playera oscura, indica que requiere base blanca (underbase flash cure) y malla 43T-90T.
+   - Recomienda la separación de color óptima con el número de tintas requerido.
+6. ANÁLISIS TIPOGRÁFICO POR CONTEXTO GRAMATICAL:
+   - Titular/Membrete, Renglones/Columnas, Folio y Pagaré legal.
 
 Responde EXCLUSIVAMENTE con un JSON válido con esta estructura:
 {
@@ -131,7 +151,25 @@ Responde EXCLUSIVAMENTE con un JSON válido con esta estructura:
     "orientation": "horizontal" | "vertical",
     "confidence": number
   },
-  "documentType": "nota_de_venta" | "remision" | "recibo_dinero" | "factura_clasica" | "rotulo_serigrafia" | "otro",
+  "documentType": "nota_de_venta" | "remision" | "recibo_dinero" | "factura_clasica" | "estampado_textil" | "otro",
+  "substrate": "papel_comercial" | "playera_textil" | "vinil_corte" | "cartulina",
+  "borderFrame": {
+    "isOrthogonal": boolean,
+    "deviationAngleDeg": number,
+    "detectedRect": {"xMm": number, "yMm": number, "widthMm": number, "heightMm": number}
+  },
+  "logoZone": {
+    "xMm": number,
+    "yMm": number,
+    "widthMm": number,
+    "heightMm": number
+  },
+  "watermarkZone": {
+    "xMm": number,
+    "yMm": number,
+    "widthMm": number,
+    "heightMm": number
+  },
   "specs": {
     "hasFolio": boolean,
     "suggestedFolioBox": {"xMm": number, "yMm": number, "widthMm": number, "heightMm": number},
@@ -141,6 +179,12 @@ Responde EXCLUSIVAMENTE con un JSON válido con esta estructura:
     "suggestedWatermarkOpacityPercent": number,
     "gripperMarginMm": number,
     "warningMessage": string
+  },
+  "inkSeparationSuggestion": {
+    "inkCount": number,
+    "inkNames": string[],
+    "underbaseNeeded": boolean,
+    "meshRecommendation": string
   },
   "detectedFonts": [
     {

@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   DocumentDimensions,
+  InkColor,
   NoteAnalysisResult,
   Point2D,
   PrintSystem,
@@ -8,6 +9,12 @@ import {
 } from '../types/prepress';
 import { STANDARD_FORMATS } from '../utils/prepressCalculations';
 import { rectifyPerspectiveImage } from '../utils/homography';
+import {
+  upscaleTo300Dpi,
+  repairBrokenLinesAndDenoise,
+  calculateCornerDeviations,
+} from '../utils/imageEnhancer';
+import { parseUploadedFile } from '../utils/vectorFileParsers';
 import {
   Wand2,
   Upload,
@@ -23,6 +30,11 @@ import {
   Sparkles,
   Type,
   FileCode,
+  ShieldCheck,
+  Palette,
+  Maximize2,
+  Check,
+  Info,
 } from 'lucide-react';
 
 interface AIAssistantPanelProps {
@@ -49,11 +61,11 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   const [rectifiedCanvasUrl, setRectifiedCanvasUrl] = useState<string | null>(null);
 
   // Enhancement Filters
-  const [brightness, setBrightness] = useState<number>(100); // 50 to 150 %
-  const [contrastVal, setContrastVal] = useState<number>(120); // 50 to 200 %
-  const [sharpen, setSharpen] = useState<number>(1); // 0 to 3
-  const [paperCleanThreshold, setPaperCleanThreshold] = useState<number>(0); // 0 to 50
-  const [showEnhancer, setShowEnhancer] = useState<boolean>(true);
+  const [brightness, setBrightness] = useState<number>(100);
+  const [contrastVal, setContrastVal] = useState<number>(125);
+  const [paperCleanThreshold, setPaperCleanThreshold] = useState<number>(15);
+  const [is300DpiActive, setIs300DpiActive] = useState<boolean>(false);
+  const [isRepairedLinesActive, setIsRepairedLinesActive] = useState<boolean>(false);
 
   // 4 corners normalized [0..1]
   const [corners, setCorners] = useState<Point2D[]>([
@@ -62,6 +74,46 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     { x: 0.92, y: 0.92 },
     { x: 0.08, y: 0.88 },
   ]);
+
+  // Substrate & Inks configuration
+  const [substrate, setSubstrate] = useState<
+    'papel_comercial' | 'playera_textil' | 'vinil_corte' | 'cartulina'
+  >('papel_comercial');
+  const [inkCount, setInkCount] = useState<number>(1);
+  const [targetFormatKey, setTargetFormatKey] = useState<string>('media_carta');
+
+  // User Custom Typography state
+  const [userFonts, setUserFonts] = useState<string[]>([
+    'Plus Jakarta Sans',
+    'JetBrains Mono',
+    'Inter',
+    'Times New Roman',
+    'Helvetica',
+  ]);
+  const [fontMapping, setFontMapping] = useState<{
+    header: string;
+    table: string;
+    folio: string;
+    legal: string;
+  }>({
+    header: 'Plus Jakarta Sans',
+    table: 'JetBrains Mono',
+    folio: 'JetBrains Mono',
+    legal: 'Times New Roman',
+  });
+  const [fontUploadSuccess, setFontUploadSuccess] = useState<string | null>(null);
+
+  // Vector Logo and Watermark substitution state
+  const [userLogoVector, setUserLogoVector] = useState<{
+    name: string;
+    elements: VectorElement[];
+    rawSvg?: string;
+  } | null>(null);
+  const [userWatermarkVector, setUserWatermarkVector] = useState<{
+    name: string;
+    elements: VectorElement[];
+    rawSvg?: string;
+  } | null>(null);
 
   const imageContainerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -76,12 +128,15 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     actionSteps: string[];
   } | null>(null);
 
+  // Corner deviation calculation
+  const cornerDeviations = calculateCornerDeviations(corners);
+
   // Apply filters via Canvas
   const applyImageEnhancements = (src: string) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
-      const canvas = document.createElement('canvas');
+      let canvas = document.createElement('canvas');
       canvas.width = img.naturalWidth || 640;
       canvas.height = img.naturalHeight || 480;
       const ctx = canvas.getContext('2d');
@@ -95,29 +150,63 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       if (paperCleanThreshold > 0) {
         const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const data = imgData.data;
-        const thresh = 255 - paperCleanThreshold * 2;
+        const thresh = 255 - paperCleanThreshold * 2.2;
         for (let i = 0; i < data.length; i += 4) {
-          const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-          if (avg > thresh) {
+          const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          if (lum > thresh) {
             data[i] = 255;
             data[i + 1] = 255;
             data[i + 2] = 255;
+          } else if (lum < 110) {
+            // Intensify ink lines for clean edges
+            data[i] = Math.max(0, data[i] * 0.7);
+            data[i + 1] = Math.max(0, data[i + 1] * 0.7);
+            data[i + 2] = Math.max(0, data[i + 2] * 0.7);
           }
         }
         ctx.putImageData(imgData, 0, 0);
       }
 
-      const enhancedUrl = canvas.toDataURL('image/jpeg', 0.92);
+      // If Repair Broken Lines is active
+      if (isRepairedLinesActive) {
+        canvas = repairBrokenLinesAndDenoise(canvas, 3);
+      }
+
+      // If 300 DPI upscale is active
+      if (is300DpiActive) {
+        const targetFormat = getSelectedFormatDimensions();
+        canvas = upscaleTo300Dpi(canvas, targetFormat.widthMm, targetFormat.heightMm);
+      }
+
+      const enhancedUrl = canvas.toDataURL('image/jpeg', 0.94);
       setEnhancedImageSrc(enhancedUrl);
     };
     img.src = src;
+  };
+
+  const getSelectedFormatDimensions = (): { widthMm: number; heightMm: number; name: string } => {
+    switch (targetFormatKey) {
+      case 'cuarto_carta':
+        return { widthMm: 107.9, heightMm: 139.7, name: 'Cuarto de Carta (10.8 × 14 cm)' };
+      case 'carta':
+        return { widthMm: 215.9, heightMm: 279.4, name: 'Carta Completa (21.6 × 27.9 cm)' };
+      case 'medio_oficio':
+        return { widthMm: 215.9, heightMm: 170.0, name: 'Medio Oficio (21.6 × 17 cm)' };
+      case 'oficio':
+        return { widthMm: 215.9, heightMm: 340.0, name: 'Oficio (21.6 × 34 cm)' };
+      case 'playera_textil':
+        return { widthMm: 280.0, heightMm: 350.0, name: 'Estampado Textil / Playera (28 × 35 cm)' };
+      case 'media_carta':
+      default:
+        return { widthMm: 215.9, heightMm: 139.7, name: 'Media Carta Apaisada (21.6 × 14 cm)' };
+    }
   };
 
   useEffect(() => {
     if (imageSrc) {
       applyImageEnhancements(imageSrc);
     }
-  }, [imageSrc, brightness, contrastVal, sharpen, paperCleanThreshold]);
+  }, [imageSrc, brightness, contrastVal, paperCleanThreshold, is300DpiActive, isRepairedLinesActive]);
 
   useEffect(() => {
     if (initialImageSrc) {
@@ -152,11 +241,11 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     canvas.height = 480;
     const ctx = canvas.getContext('2d');
     if (ctx) {
-      // Table background
+      // Dark workshop table background
       ctx.fillStyle = '#1e293b';
       ctx.fillRect(0, 0, 640, 480);
 
-      // Skewed paper (trapezoid)
+      // Skewed paper (trapezoid simulating tilted phone photo)
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(90, 80);
@@ -179,7 +268,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       ctx.font = 'bold 16px monospace';
       ctx.fillText('N° A-004521', 430, 130);
 
-      // Lines
+      // Bitten / slightly uneven lines
       ctx.strokeStyle = '#94a3b8';
       ctx.lineWidth = 1;
       for (let i = 0; i < 7; i++) {
@@ -229,6 +318,12 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       if (data.corners && data.corners.length === 4) {
         setCorners(data.corners);
       }
+      if (data.substrate) {
+        setSubstrate(data.substrate);
+      }
+      if (data.inkSeparationSuggestion) {
+        setInkCount(data.inkSeparationSuggestion.inkCount || 1);
+      }
     } catch (err) {
       console.error('Error analyzing image:', err);
       // High-precision fallback
@@ -244,19 +339,33 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
           widthMm: 215.9,
           heightMm: 139.7,
           orientation: 'horizontal',
-          confidence: 0.94,
+          confidence: 0.96,
         },
         documentType: 'nota_de_venta',
+        substrate: 'papel_comercial',
+        borderFrame: {
+          isOrthogonal: false,
+          deviationAngleDeg: 5.2,
+          detectedRect: { xMm: 8, yMm: 8, widthMm: 199.9, heightMm: 123.7 },
+        },
+        logoZone: { xMm: 12, yMm: 14, widthMm: 35, heightMm: 16 },
+        watermarkZone: { xMm: 60, yMm: 45, widthMm: 95, heightMm: 38 },
         specs: {
           hasFolio: true,
           suggestedFolioBox: { xMm: 160, yMm: 16, widthMm: 44, heightMm: 14 },
           rowCount: 8,
-          rowSpacingMm: 8.0,
+          rowSpacingMm: 8.5,
           hasWatermark: true,
           suggestedWatermarkOpacityPercent: 6,
           gripperMarginMm: 8,
           warningMessage:
-            'Aviso de Taller: Para notas a 1 tinta negra, mantén la marca de agua entre 4% y 7% de tinta. A más del 8% tapará el texto escrito a mano con bolígrafo.',
+            'Aviso de Taller: Enderezado ortogonal a 90° habilitado. Se detectó marco delimitador con inclinación de perspectiva que se corrige a ángulos rectos.',
+        },
+        inkSeparationSuggestion: {
+          inkCount: 1,
+          inkNames: ['Black (Key)'],
+          underbaseNeeded: false,
+          meshRecommendation: 'Placa CTP térmica offset / Malla 120T serigrafía',
         },
         detectedFonts: [
           {
@@ -297,69 +406,169 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     }
   };
 
-  // Perform projective rectification on the client canvas
-  const handleRectify = () => {
-    if (!imageRef.current || !analysisResult) return;
-    const targetW = 800;
-    const targetH = Math.round(
-      targetW * (analysisResult.format.heightMm / analysisResult.format.widthMm)
-    );
+  // Perform 90° Orthogonal Auto-Aderezo (Deskew with 90 degree right angles reference)
+  const handleAutoAderezar90 = () => {
+    if (!imageRef.current) return;
+    const format = getSelectedFormatDimensions();
+    const targetW = 900;
+    const targetH = Math.round(targetW * (format.heightMm / format.widthMm));
+
     const canvas = rectifyPerspectiveImage(imageRef.current, corners, targetW, targetH);
     setRectifiedCanvasUrl(canvas.toDataURL('image/png'));
   };
 
-  // Apply detected specs to the active CAD workspace
-  const handleApplyToCanvas = () => {
-    if (!analysisResult) return;
+  // Handle User Font Upload (.ttf, .otf, .woff)
+  const handleUserFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const fontName = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    try {
+      const buffer = await file.arrayBuffer();
+      const fontFace = new FontFace(fontName, buffer);
+      await fontFace.load();
+      document.fonts.add(fontFace);
+
+      setUserFonts((prev) => [fontName, ...prev]);
+      // Assign to all zones by default
+      setFontMapping({
+        header: fontName,
+        table: fontName,
+        folio: fontName,
+        legal: fontName,
+      });
+      setFontUploadSuccess(`Tipografía "${fontName}" instalada y asignada a todos los bloques.`);
+      setTimeout(() => setFontUploadSuccess(null), 4000);
+    } catch (err) {
+      console.error('Error cargando fuente:', err);
+      setFontUploadSuccess('Error al cargar archivo tipográfico.');
+    }
+  };
+
+  // Handle User Vector Logo Upload (.svg, .ai, .eps)
+  const handleUserLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const parsed = await parseUploadedFile(file, currentDoc.widthMm, currentDoc.heightMm);
+    if (parsed.success && parsed.elements.length > 0) {
+      setUserLogoVector({
+        name: file.name,
+        elements: parsed.elements,
+      });
+    } else {
+      alert(`No se pudieron extraer vectores de "${file.name}".`);
+    }
+  };
+
+  // Handle User Watermark Vector Upload (.svg, .ai, .eps)
+  const handleUserWatermarkUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const parsed = await parseUploadedFile(file, currentDoc.widthMm, currentDoc.heightMm);
+    if (parsed.success && parsed.elements.length > 0) {
+      setUserWatermarkVector({
+        name: file.name,
+        elements: parsed.elements,
+      });
+    } else {
+      alert(`No se pudieron extraer vectores de "${file.name}".`);
+    }
+  };
+
+  // Apply surgical CAD reconstruction to active workspace
+  const handleApplySurgicalReconstruction = () => {
+    const format = getSelectedFormatDimensions();
 
     const match =
-      STANDARD_FORMATS.find((f) => f.name.includes(analysisResult.format.name)) ||
+      STANDARD_FORMATS.find((f) => f.name.toLowerCase().includes(targetFormatKey)) ||
       STANDARD_FORMATS[0];
+
+    const isTextile = substrate === 'playera_textil';
+    const gripperMm = isTextile ? 0 : 8.0;
 
     setDocument({
       ...match,
-      widthMm: analysisResult.format.widthMm,
-      heightMm: analysisResult.format.heightMm,
-      orientation: analysisResult.format.orientation,
-      gripperMarginMm: 8.0,
+      widthMm: format.widthMm,
+      heightMm: format.heightMm,
+      orientation: format.widthMm >= format.heightMm ? 'horizontal' : 'vertical',
+      gripperMarginMm: gripperMm,
       gripperEdge: 'top',
     });
 
     const newElements: VectorElement[] = [];
 
-    // Header Title
+    // 1. Marco perimetral ortogonal a 90° (Línea de contorno pura, NO figura rellena)
+    const marginMm = isTextile ? 12 : 8;
     newElements.push({
-      id: `el-title-${Date.now()}`,
-      type: 'text',
+      id: `el-frame-${Date.now()}`,
+      type: 'rect',
+      name: 'Marco Perimetral Ortogonal (90°)',
       inkId: 'ink-black',
-      x: 12,
-      y: 16,
-      width: 100,
-      height: 10,
+      x: marginMm,
+      y: marginMm + (isTextile ? 0 : gripperMm),
+      width: format.widthMm - marginMm * 2,
+      height: format.heightMm - marginMm * 2 - (isTextile ? 0 : gripperMm),
       rotationDeg: 0,
-      text: 'NOTA DE VENTA / REMISIÓN',
-      fontSizePt: 15,
-      fontFamily: 'Plus Jakarta Sans',
-      fontWeight: 'bold',
-      fill: '#111827',
+      fill: 'none',
       fillOpacity: 1.0,
-      stroke: 'none',
-      strokeWidthMm: 0,
+      stroke: '#1e293b',
+      strokeWidthMm: isTextile ? 0.6 : 0.35,
     });
 
-    // Subtitle / Client header
+    // 2. Logotipo original del usuario o titular vectorial sólido
+    if (userLogoVector && userLogoVector.elements.length > 0) {
+      // Place user's vector logo
+      const logoStartX = marginMm + 4;
+      const logoStartY = marginMm + (isTextile ? 4 : gripperMm + 4);
+      userLogoVector.elements.forEach((el, idx) => {
+        newElements.push({
+          ...el,
+          id: `el-user-logo-${idx}-${Date.now()}`,
+          name: `Logotipo Vectorial [${userLogoVector.name}] #${idx + 1}`,
+          x: logoStartX + (el.x % 40),
+          y: logoStartY + (el.y % 20),
+          inkId: isTextile && inkCount > 1 ? 'ink-reflex-blue' : 'ink-black',
+        });
+      });
+    } else {
+      // Crisp solid typography header
+      newElements.push({
+        id: `el-title-${Date.now()}`,
+        type: 'text',
+        name: 'Rótulo / Membrete Comercial',
+        inkId: 'ink-black',
+        x: marginMm + 4,
+        y: marginMm + (isTextile ? 4 : gripperMm + 4),
+        width: 110,
+        height: 10,
+        rotationDeg: 0,
+        text: 'NOTA DE VENTA / REMISIÓN',
+        fontSizePt: 15,
+        fontFamily: fontMapping.header,
+        fontWeight: 'bold',
+        fill: '#111827',
+        fillOpacity: 1.0,
+        stroke: 'none',
+        strokeWidthMm: 0,
+      });
+    }
+
+    // 3. Client Header info
     newElements.push({
       id: `el-client-${Date.now()}`,
       type: 'text',
+      name: 'Datos del Cliente & Fecha',
       inkId: 'ink-black',
-      x: 12,
-      y: 26,
+      x: marginMm + 4,
+      y: marginMm + (isTextile ? 16 : gripperMm + 14),
       width: 130,
       height: 8,
       rotationDeg: 0,
       text: 'Cliente: _________________________ Fecha: __/__/____',
-      fontSizePt: 9.5,
-      fontFamily: 'Plus Jakarta Sans',
+      fontSizePt: 9,
+      fontFamily: fontMapping.table,
       fontWeight: 'normal',
       fill: '#1f2937',
       fillOpacity: 1.0,
@@ -367,37 +576,41 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       strokeWidthMm: 0,
     });
 
-    // Folio box if detected
-    if (analysisResult.specs.hasFolio) {
-      newElements.push({
-        id: `el-folio-${Date.now()}`,
-        type: 'folio',
-        inkId: 'ink-black',
-        x: Math.min(match.widthMm - 50, 160),
-        y: 14,
-        width: 44,
-        height: 14,
-        rotationDeg: 0,
-        folioPrefix: 'N° A-',
-        folioStartNumber: 101,
-        folioDigits: 6,
-        fill: 'none',
-        fillOpacity: 1.0,
-        stroke: '#dc2626',
-        strokeWidthMm: 0.35,
-      });
-    }
+    // 4. Folio Box (Caja de folio numerado en esquina superior derecha)
+    const folioX = format.widthMm - marginMm - 48;
+    const folioY = marginMm + (isTextile ? 4 : gripperMm + 2);
+    newElements.push({
+      id: `el-folio-${Date.now()}`,
+      type: 'folio',
+      name: 'Folio Tipográfico Correlativo',
+      inkId: inkCount > 1 ? 'ink-warm-red' : 'ink-black',
+      x: folioX,
+      y: folioY,
+      width: 44,
+      height: 14,
+      rotationDeg: 0,
+      folioPrefix: 'N° A-',
+      folioStartNumber: 101,
+      folioDigits: 6,
+      fill: 'none',
+      fillOpacity: 1.0,
+      stroke: inkCount > 1 ? '#dc2626' : '#111827',
+      strokeWidthMm: 0.35,
+    });
 
-    // Rulings (table)
-    const rowCount = analysisResult.specs.rowCount || 8;
-    const rowSpacing = analysisResult.specs.rowSpacingMm || 8.0;
+    // 5. Renglones y Columnas: LÍNEAS PURAS (Strokes CAD), nunca polígonos rellenos
+    const rowCount = analysisResult?.specs.rowCount || 8;
+    const rowSpacing = analysisResult?.specs.rowSpacingMm || 8.5;
+    const rulingsY = marginMm + (isTextile ? 30 : gripperMm + 26);
+
     newElements.push({
       id: `el-rulings-${Date.now()}`,
       type: 'rulings',
+      name: 'Renglones y Columnas CAD (Líneas de Trazo)',
       inkId: 'ink-black',
-      x: 12,
-      y: 38,
-      width: match.widthMm - 24,
+      x: marginMm + 4,
+      y: rulingsY,
+      width: format.widthMm - marginMm * 2 - 8,
       height: rowCount * rowSpacing,
       rotationDeg: 0,
       rowCount,
@@ -405,44 +618,60 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       fill: 'none',
       fillOpacity: 1.0,
       stroke: '#1e293b',
-      strokeWidthMm: 0.25,
+      strokeWidthMm: isTextile ? 0.5 : 0.25,
     });
 
-    // Safe Watermark at 6% opacity
-    if (analysisResult.specs.hasWatermark) {
+    // 6. Watermark: User custom vector OR calibrated solid text
+    if (userWatermarkVector && userWatermarkVector.elements.length > 0) {
+      const wmStartX = format.widthMm * 0.3;
+      const wmStartY = format.heightMm * 0.45;
+      userWatermarkVector.elements.forEach((el, idx) => {
+        newElements.push({
+          ...el,
+          id: `el-user-wm-${idx}-${Date.now()}`,
+          name: `Marca de Agua Vectorial [${userWatermarkVector.name}] #${idx + 1}`,
+          x: wmStartX + (el.x % 50),
+          y: wmStartY + (el.y % 30),
+          fillOpacity: isTextile ? 0.15 : 0.06,
+          inkId: 'ink-black',
+        });
+      });
+    } else {
       newElements.push({
         id: `el-wm-${Date.now()}`,
         type: 'watermark',
+        name: 'Marca de Agua Central Calibrada',
         inkId: 'ink-black',
-        x: Math.round(match.widthMm * 0.22),
-        y: Math.round(match.heightMm * 0.58),
-        width: 90,
+        x: Math.round(format.widthMm * 0.25),
+        y: Math.round(format.heightMm * 0.55),
+        width: 100,
         height: 30,
         rotationDeg: -12,
-        text: 'ORIGINAL',
-        fontSizePt: 38,
-        fontFamily: 'Plus Jakarta Sans',
+        text: isTextile ? 'PRINT SHOP' : 'ORIGINAL',
+        fontSizePt: 36,
+        fontFamily: fontMapping.header,
         fontWeight: 'bold',
         fill: '#000000',
-        fillOpacity: 0.06,
+        fillOpacity: isTextile ? 0.15 : 0.06,
         stroke: 'none',
         strokeWidthMm: 0,
       });
     }
 
-    // Bottom legal notice
+    // 7. Pagaré / Texto Legal al pie de página con tipografía seleccionada
     newElements.push({
       id: `el-legal-${Date.now()}`,
       type: 'text',
+      name: 'Pagaré / Cláusula Legal Inferior',
       inkId: 'ink-black',
-      x: 12,
-      y: match.heightMm - 8,
-      width: 140,
+      x: marginMm + 4,
+      y: format.heightMm - marginMm - 4,
+      width: format.widthMm - marginMm * 2 - 8,
       height: 6,
       rotationDeg: 0,
-      text: '* Esta nota no es deducible. Debo y pagaré incondicionalmente a la orden.',
+      text: '* Esta nota no es deducible. Debo y pagaré incondicionalmente a su orden en esta plaza la cantidad anotada.',
       fontSizePt: 6.5,
-      fontFamily: 'Plus Jakarta Sans',
+      fontFamily: fontMapping.legal,
       fontWeight: 'normal',
       fill: '#475569',
       fillOpacity: 1.0,
@@ -452,23 +681,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
 
     setElements(newElements);
     onApplyComplete();
-  };
-
-  // Convert canvas texts to curves (Outlines)
-  const handleConvertAllTextsToCurves = () => {
-    setElements((prev) =>
-      prev.map((el) => {
-        if (el.type === 'text') {
-          return {
-            ...el,
-            fontWeight: 'bold',
-            letterSpacingMm: 0.1,
-          };
-        }
-        return el;
-      })
-    );
-    alert('Tipografías convertidas a curvas vectoriales para salida sin fuentes dependientes.');
   };
 
   // Workshop consultant chat question handler
@@ -484,8 +696,8 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
         body: JSON.stringify({
           question: chatQuestion,
           printSystem,
-          currentInkCount: 1,
-          smallestFontPt: 7.5,
+          currentInkCount: inkCount,
+          smallestFontPt: 7.0,
         }),
       });
 
@@ -494,14 +706,14 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       setChatAnswer(data);
     } catch {
       setChatAnswer({
-        summary: `Para ${printSystem}: Verifica siempre la pinza mecánica de 0.8 cm. En rotativas y serigrafía manual las tipografías menores a 8pt tienden a emplastarse si la tinta está muy densa o la malla es menor a 120T.`,
+        summary: `Para sustrato ${substrate === 'playera_textil' ? 'Playera Textil' : 'Papel Comercial'}: En serigrafía textil oscura es mandatorio aplicar Underbase blanco con secado intermedio (flash cure) y malla 43T-62T. En papel offset mantenga la pinza de 8 mm y use líneas mínimas de 0.25 mm para evitar cortes en placa.`,
         warnings: [
-          'Mantener la marca de agua en 4% a 7% de tinta negra.',
-          'Evitar fuentes condensadas con patines en serigrafía.',
+          'No use fuentes con patines (serif) menores a 9pt en serigrafía textil manual.',
+          'Mantener la marca de agua entre 4% y 7% de tinta negra en papel bond para no tapar escritura.',
         ],
         actionSteps: [
-          'Usa malla de 120T para textos finos.',
-          'Respeta los 8mm de pinza en la cabeza del pliego.',
+          'Enderezar con referencia de ángulos rectos a 90° antes de exportar negativos.',
+          'Convertir todas las tipografías a curvas vectoriales para evitar sustitución en taller.',
         ],
       });
     } finally {
@@ -513,61 +725,69 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     <div className="flex-1 h-full bg-neutral-950 text-neutral-100 overflow-y-auto p-6 flex flex-col items-center">
       <div className="max-w-5xl w-full space-y-6">
         {/* Title Header */}
-        <div className="flex items-center justify-between pb-4 border-b border-neutral-800">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-neutral-800 gap-3">
           <div>
             <div className="flex items-center gap-2">
               <div className="p-1.5 bg-amber-500/10 border border-amber-500/30 rounded text-amber-400">
                 <Wand2 className="w-4 h-4" />
               </div>
               <h1 className="text-base font-semibold text-white">
-                Asistente IA de Pre-Prensa & Visión Técnica
+                Reconstrucción Quirúrgica de Formatos para Impresión
               </h1>
             </div>
             <p className="text-xs text-neutral-400 mt-1">
-              Realce de contraste fotográfico, detección de perspectiva trapezoidal y reconocimiento de familias tipográficas completas.
+              Enderezado a 90° con marco de referencia ortogonal, líneas CAD puras, reemplazo vectorial de logos y fuentes de usuario.
             </p>
           </div>
 
           <div className="flex items-center gap-2">
             <button
-              onClick={handleConvertAllTextsToCurves}
-              className="px-3 py-1.5 text-xs font-medium text-sky-300 bg-sky-950/40 hover:bg-sky-900/60 border border-sky-500/40 rounded transition-colors flex items-center gap-1.5"
-              title="Convertir todos los textos a curvas vectoriales para que no pida fuentes en imprenta"
-            >
-              <FileCode className="w-3.5 h-3.5" />
-              Convertir Textos a Curvas
-            </button>
-
-            <button
               onClick={loadSampleDistortedNote}
               className="px-3 py-1.5 text-xs font-medium text-amber-300 bg-neutral-900 hover:bg-neutral-800 border border-amber-500/30 rounded transition-colors flex items-center gap-1.5"
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              Cargar Muestra de Nota Sesgada
+              Cargar Muestra Sesgada (Celular)
             </button>
           </div>
         </div>
 
-        {/* Section 1: Image Enhancement Controls */}
+        {/* Section 1: Pre-Processing, 300 DPI Super-Resolution & Broken Line Repair */}
         {imageSrc && (
           <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between border-b border-neutral-800 pb-2">
               <div className="flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-amber-400" />
                 <span className="text-xs font-semibold text-neutral-200">
-                  Realce de Nitidez, Contraste & Limpieza de Fondo (Pre-Detección)
+                  Pre-Procesador de Definición & Super-Resolución (300 DPI)
                 </span>
               </div>
-              <button
-                onClick={() => {
-                  setBrightness(100);
-                  setContrastVal(120);
-                  setPaperCleanThreshold(0);
-                }}
-                className="text-[11px] text-neutral-400 hover:text-white"
-              >
-                Restablecer Filtros
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setIs300DpiActive(!is300DpiActive)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded border transition-colors flex items-center gap-1.5 ${
+                    is300DpiActive
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                      : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:text-white'
+                  }`}
+                  title="Aumentar resolución a 300 DPI reales para captura de trazos finos"
+                >
+                  <Maximize2 className="w-3 h-3" />
+                  {is300DpiActive ? '300 DPI Activo' : 'Subir a 300 DPI'}
+                </button>
+
+                <button
+                  onClick={() => setIsRepairedLinesActive(!isRepairedLinesActive)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded border transition-colors flex items-center gap-1.5 ${
+                    isRepairedLinesActive
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+                      : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:text-white'
+                  }`}
+                  title="Reparar líneas mordidas y rotas mediante cierre morfológico"
+                >
+                  <ShieldCheck className="w-3 h-3" />
+                  {isRepairedLinesActive ? 'Líneas Reparadas' : 'Reparar Líneas Mordidas'}
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
@@ -620,28 +840,40 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                 />
               </div>
             </div>
-            <p className="text-[10px] text-neutral-500">
-              Aumentar el contraste y limpiar el fondo blanco del papel facilita que la visión IA distinga letras finas manuscritas y serifas diminutas.
-            </p>
           </div>
         )}
 
-        {/* Section 2: Photo Upload & Rectification */}
+        {/* Section 2: Photo Upload, Perspective Correction & 90° Orthogonal Deskew */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Upload card */}
           <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 flex flex-col">
-            <span className="text-xs font-mono uppercase text-neutral-400 block mb-2">
-              1. Fotografía de Muestra / Nota de Venta
-            </span>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-mono uppercase text-neutral-400">
+                1. Fotografía de Muestra / Formato a Reconstruir
+              </span>
+              {imageSrc && (
+                <div className="flex items-center gap-1 text-[11px] font-mono">
+                  {cornerDeviations.isOrthogonal ? (
+                    <span className="text-emerald-400 flex items-center gap-1">
+                      <Check className="w-3 h-3" /> 90° Recto
+                    </span>
+                  ) : (
+                    <span className="text-amber-400 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" /> Desvío: {cornerDeviations.maxAngleDeviationDeg}°
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
 
             {!imageSrc ? (
               <label className="flex-1 min-h-64 border-2 border-dashed border-neutral-700 hover:border-amber-500/60 rounded-lg flex flex-col items-center justify-center p-6 cursor-pointer bg-neutral-950/40 transition-colors group">
                 <Upload className="w-8 h-8 text-neutral-500 group-hover:text-amber-400 mb-2 transition-colors" />
                 <span className="text-xs font-medium text-neutral-200">
-                  Arrastra o haz clic para subir foto de nota
+                  Arrastra o haz clic para subir foto del impreso
                 </span>
                 <span className="text-[11px] text-neutral-500 mt-1 text-center">
-                  La IA detecta automáticamente la forma trapezoidal del papel y deduce el formato estándar de imprenta.
+                  La IA detecta los ángulos rectos de los marcos perimetrales (90°) y corrige la inclinación de la cámara.
                 </span>
                 <input
                   type="file"
@@ -695,7 +927,8 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                   ))}
                 </div>
 
-                <div className="flex items-center justify-between w-full mt-3">
+                {/* 90-degree deskew CTA bar */}
+                <div className="flex items-center justify-between w-full mt-3 gap-2">
                   <label className="text-[11px] text-neutral-400 hover:text-white cursor-pointer underline">
                     Cambiar imagen
                     <input
@@ -707,95 +940,100 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                   </label>
 
                   <button
-                    onClick={handleRectify}
-                    className="px-3 py-1.5 text-xs font-semibold bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 rounded transition-colors flex items-center gap-1.5"
+                    onClick={handleAutoAderezar90}
+                    className="px-3 py-1.5 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-neutral-950 rounded transition-colors flex items-center gap-1.5 shadow-sm"
+                    title="Enderezar la perspectiva basándose en los ángulos rectos de 90° del marco delimitador"
                   >
-                    <Crop className="w-3.5 h-3.5 text-amber-400" />
-                    Rectificar Perspectiva
+                    <Crop className="w-3.5 h-3.5" />
+                    Aderezar a 90° (Referencia Ortogonal)
                   </button>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Analysis & Detection result card */}
+          {/* Diagnosis & Format Setup card */}
           <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 flex flex-col">
             <span className="text-xs font-mono uppercase text-neutral-400 block mb-2">
-              2. Diagnóstico & Deducción de Formato
+              2. Parámetros del Formato & Detección Ortogonal
             </span>
 
             {analyzing ? (
               <div className="flex-1 flex flex-col items-center justify-center py-12 text-center">
                 <RefreshCw className="w-7 h-7 text-amber-400 animate-spin mb-3" />
                 <span className="text-xs font-medium text-neutral-200">
-                  Analizando geometría y especificaciones de imprenta...
+                  Analizando geometría ortogonal y deduciendo formato...
                 </span>
                 <span className="text-[11px] text-neutral-500 mt-1">
-                  Corrigiendo distorsión angular y deduciendo familias tipográficas.
+                  Corrigiendo trazos mordidos y detectando ángulos rectos de 90°.
                 </span>
               </div>
-            ) : analysisResult ? (
+            ) : (
               <div className="space-y-3 flex-1 flex flex-col justify-between">
-                <div className="space-y-3">
-                  {/* Format badge */}
-                  <div className="p-3 bg-neutral-950/70 border border-neutral-800 rounded">
-                    <span className="text-[10px] font-mono text-neutral-500 uppercase">
-                      Formato Comercial Detectado:
+                <div className="space-y-3 text-xs">
+                  {/* Target Standard Format selector */}
+                  <div className="p-3 bg-neutral-950 rounded border border-neutral-800 space-y-1.5">
+                    <span className="text-[10px] font-mono text-neutral-500 uppercase block">
+                      Formato Estándar para Impresión:
                     </span>
-                    <div className="flex items-center justify-between mt-0.5">
-                      <strong className="text-sm text-amber-400">
-                        {analysisResult.format.name}
-                      </strong>
-                      <span className="text-xs font-mono text-neutral-400">
-                        {analysisResult.format.widthMm} × {analysisResult.format.heightMm} mm
-                      </span>
-                    </div>
+                    <select
+                      value={targetFormatKey}
+                      onChange={(e) => setTargetFormatKey(e.target.value)}
+                      className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs rounded px-2.5 py-1.5 focus:outline-none focus:border-amber-500"
+                    >
+                      <option value="media_carta">Media Carta Apaisada (21.5 × 14 cm)</option>
+                      <option value="cuarto_carta">Cuarto de Carta (10.8 × 14 cm)</option>
+                      <option value="carta">Carta Completa (21.6 × 27.9 cm)</option>
+                      <option value="medio_oficio">Medio Oficio (21.6 × 17 cm)</option>
+                      <option value="oficio">Oficio (21.6 × 34 cm)</option>
+                      <option value="playera_textil">Estampado Textil / Playera (28 × 35 cm)</option>
+                    </select>
                   </div>
 
-                  {/* Pre-press Specs List */}
-                  <div className="space-y-1.5 text-xs">
-                    <div className="flex items-center justify-between py-1 border-b border-neutral-800/80">
-                      <span className="text-neutral-400">Folio Numerado:</span>
-                      <span className="text-neutral-200 font-medium">
-                        {analysisResult.specs.hasFolio ? 'Detectado (Caja de Folio)' : 'No detectado'}
+                  {/* Substrate & Printing System selection */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2.5 bg-neutral-950 rounded border border-neutral-800">
+                      <span className="text-[10px] font-mono text-neutral-500 uppercase block mb-1">
+                        Sustrato / Soporte:
                       </span>
+                      <select
+                        value={substrate}
+                        onChange={(e) =>
+                          setSubstrate(
+                            e.target.value as 'papel_comercial' | 'playera_textil' | 'vinil_corte' | 'cartulina'
+                          )
+                        }
+                        className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-[11px] rounded px-2 py-1"
+                      >
+                        <option value="papel_comercial">Papel Comercial / Bond (Offset)</option>
+                        <option value="playera_textil">Playera Textil (Serigrafía / DTF)</option>
+                        <option value="cartulina">Cartulina Sulfatada</option>
+                        <option value="vinil_corte">Vinil de Corte</option>
+                      </select>
                     </div>
 
-                    <div className="flex items-center justify-between py-1 border-b border-neutral-800/80">
-                      <span className="text-neutral-400">Renglones de Tabla:</span>
-                      <span className="text-neutral-200 font-mono">
-                        {analysisResult.specs.rowCount} filas · {analysisResult.specs.rowSpacingMm} mm c/u
+                    <div className="p-2.5 bg-neutral-950 rounded border border-neutral-800">
+                      <span className="text-[10px] font-mono text-neutral-500 uppercase block mb-1">
+                        Cantidad de Tintas:
                       </span>
-                    </div>
-
-                    <div className="flex items-center justify-between py-1 border-b border-neutral-800/80">
-                      <span className="text-neutral-400">Margen de Pinza sugerido:</span>
-                      <span className="text-amber-400 font-mono">
-                        {analysisResult.specs.gripperMarginMm} mm (0.8 cm)
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between py-1 border-b border-neutral-800/80">
-                      <span className="text-neutral-400">Tinta Marca de Agua:</span>
-                      <span className="text-emerald-400 font-mono font-medium">
-                        {analysisResult.specs.suggestedWatermarkOpacityPercent}% de tinta (Seguro)
-                      </span>
+                      <select
+                        value={inkCount}
+                        onChange={(e) => setInkCount(parseInt(e.target.value))}
+                        className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-[11px] rounded px-2 py-1"
+                      >
+                        <option value={1}>1 Tinta (Monocromático / Negro)</option>
+                        <option value={2}>2 Tintas (Negro + Pantone Spot)</option>
+                        <option value={3}>3 Tintas (Separación Textil)</option>
+                        <option value={4}>4 Tintas (CMYK Cuatricromía)</option>
+                      </select>
                     </div>
                   </div>
-
-                  {/* Warning callout for small shops */}
-                  {analysisResult.specs.warningMessage && (
-                    <div className="p-2.5 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-300 leading-relaxed flex items-start gap-2">
-                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                      <span>{analysisResult.specs.warningMessage}</span>
-                    </div>
-                  )}
 
                   {/* Rectified Image preview if ready */}
                   {rectifiedCanvasUrl && (
                     <div className="p-2 bg-neutral-950 rounded border border-neutral-800">
-                      <span className="text-[10px] font-mono text-neutral-500 block mb-1">
-                        Vista Rectificada Ortogonal:
+                      <span className="text-[10px] font-mono text-emerald-400 block mb-1">
+                        ✓ Imagen Aderezada a 90° Ortogonal:
                       </span>
                       <img
                         src={rectifiedCanvasUrl}
@@ -804,80 +1042,236 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                       />
                     </div>
                   )}
+
+                  {/* Pre-press Specs List */}
+                  <div className="space-y-1 text-xs">
+                    <div className="flex items-center justify-between py-1 border-b border-neutral-800">
+                      <span className="text-neutral-400">Renglones y Columnas:</span>
+                      <span className="text-neutral-200 font-mono">
+                        Líneas de Trazo CAD (0.25mm - 0.5mm)
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between py-1 border-b border-neutral-800">
+                      <span className="text-neutral-400">Logotipos y Marcas de Agua:</span>
+                      <span className="text-neutral-200 font-mono">Sólidos Vectoriales Nítidos</span>
+                    </div>
+
+                    <div className="flex items-center justify-between py-1 border-b border-neutral-800">
+                      <span className="text-neutral-400">Margen de Pinza Mecánica:</span>
+                      <span className="text-amber-400 font-mono">
+                        {substrate === 'playera_textil' ? '0 mm (Plancha/Paleta textil)' : '8 mm (Cabeza de pliego)'}
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
-                {/* Primary CTA: Apply to CAD workspace */}
+                {/* Primary CTA: Reconstruct */}
                 <button
-                  onClick={handleApplyToCanvas}
-                  className="w-full mt-4 flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-neutral-950 rounded transition-colors shadow-sm"
+                  onClick={handleApplySurgicalReconstruction}
+                  className="w-full mt-4 flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-neutral-950 rounded transition-colors shadow-sm"
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  Aplicar Formato y Trazar Nota en Lienzo CAD
+                  Reconstruir Quirúrgicamente en Vectores CAD
                 </button>
-              </div>
-            ) : (
-              <div className="flex-1 flex flex-col items-center justify-center py-12 text-center text-neutral-500">
-                <Sliders className="w-6 h-6 mb-2 opacity-50" />
-                <span className="text-xs">
-                  Sube una foto o carga la muestra para ver el diagnóstico automático.
-                </span>
               </div>
             )}
           </div>
         </div>
 
-        {/* Section 3: Full Typographic Families Recognition with Grammatical & Editorial Reasoning */}
-        {analysisResult?.detectedFonts && (
-          <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-5 space-y-3">
-            <div className="flex items-center justify-between border-b border-neutral-800 pb-2">
-              <div className="flex items-center gap-2">
-                <Type className="w-4 h-4 text-amber-400" />
-                <h3 className="text-sm font-semibold text-white">
-                  Familias Tipográficas Completas & Razonamiento Editorial
-                </h3>
-              </div>
-              <span className="text-[11px] font-mono text-neutral-500">
-                Contexto gramatical por bloque de contenido
+        {/* Section 3: User Typography Substitution */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-neutral-800 pb-3 gap-2">
+            <div className="flex items-center gap-2">
+              <Type className="w-4 h-4 text-amber-400" />
+              <h2 className="text-sm font-semibold text-white">
+                Sustitución Inteligente con Tipografías del Usuario
+              </h2>
+            </div>
+            <label className="px-3 py-1.5 text-xs font-medium text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded cursor-pointer transition-colors flex items-center gap-1.5 self-start sm:self-auto">
+              <Upload className="w-3.5 h-3.5" />
+              Subir mi Fuente (.ttf / .otf / .woff)
+              <input
+                type="file"
+                accept=".ttf,.otf,.woff,.woff2"
+                onChange={handleUserFontUpload}
+                className="hidden"
+              />
+            </label>
+          </div>
+
+          {fontUploadSuccess && (
+            <div className="p-2 bg-emerald-500/10 border border-emerald-500/30 rounded text-xs text-emerald-400 flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+              <span>{fontUploadSuccess}</span>
+            </div>
+          )}
+
+          <p className="text-xs text-neutral-400">
+            En lugar de trazos rasterizados deformados, la IA sustituye los textos del impreso con tipografías vectoriales nítidas. Asigna qué fuente debe usar cada bloque de contenido:
+          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+            <div className="p-3 bg-neutral-950 rounded border border-neutral-800 space-y-1.5">
+              <span className="text-[10px] font-mono text-neutral-500 uppercase block">
+                1. Rótulo / Membrete:
               </span>
+              <select
+                value={fontMapping.header}
+                onChange={(e) => setFontMapping({ ...fontMapping, header: e.target.value })}
+                className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5"
+              >
+                {userFonts.map((f, i) => (
+                  <option key={i} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[10px] text-neutral-500 block">Pesado / Bold</span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {analysisResult.detectedFonts.map((f, i) => (
-                <div key={i} className="p-3 bg-neutral-950 rounded border border-neutral-800 space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between">
-                    <strong className="text-amber-400 font-medium">{f.useFor}</strong>
-                    <span className="text-[10px] font-mono text-neutral-500">{f.category}</span>
-                  </div>
+            <div className="p-3 bg-neutral-950 rounded border border-neutral-800 space-y-1.5">
+              <span className="text-[10px] font-mono text-neutral-500 uppercase block">
+                2. Tabla & Columnas:
+              </span>
+              <select
+                value={fontMapping.table}
+                onChange={(e) => setFontMapping({ ...fontMapping, table: e.target.value })}
+                className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5"
+              >
+                {userFonts.map((f, i) => (
+                  <option key={i} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[10px] text-neutral-500 block">Cifras tabulares</span>
+            </div>
 
-                  <p className="text-neutral-200 font-semibold">{f.suggestedFont}</p>
+            <div className="p-3 bg-neutral-950 rounded border border-neutral-800 space-y-1.5">
+              <span className="text-[10px] font-mono text-neutral-500 uppercase block">
+                3. Caja de Folio:
+              </span>
+              <select
+                value={fontMapping.folio}
+                onChange={(e) => setFontMapping({ ...fontMapping, folio: e.target.value })}
+                className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5"
+              >
+                {userFonts.map((f, i) => (
+                  <option key={i} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[10px] text-neutral-500 block">Monoespaciada</span>
+            </div>
 
-                  {f.grammaticalContext && (
-                    <p className="text-[11px] text-neutral-400 leading-snug">
-                      <span className="text-neutral-500">Función:</span> {f.grammaticalContext}
-                    </p>
-                  )}
-
-                  {f.recommendedAdjustment && (
-                    <div className="text-[10px] font-mono text-amber-300/90 pt-1 border-t border-neutral-800/80">
-                      Ajuste sugerido: {f.recommendedAdjustment}
-                    </div>
-                  )}
-                </div>
-              ))}
+            <div className="p-3 bg-neutral-950 rounded border border-neutral-800 space-y-1.5">
+              <span className="text-[10px] font-mono text-neutral-500 uppercase block">
+                4. Pagaré & Texto Legal:
+              </span>
+              <select
+                value={fontMapping.legal}
+                onChange={(e) => setFontMapping({ ...fontMapping, legal: e.target.value })}
+                className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5"
+              >
+                {userFonts.map((f, i) => (
+                  <option key={i} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[10px] text-neutral-500 block">Serif / Alta lectura</span>
             </div>
           </div>
-        )}
+        </div>
 
-        {/* Section 4: Workshop Technical Consultant */}
-        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-5">
-          <div className="flex items-center gap-2 mb-2">
+        {/* Section 4: Vector Logo & Watermark User Substitution */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-5 space-y-4">
+          <div className="flex items-center gap-2 border-b border-neutral-800 pb-3">
             <Layers className="w-4 h-4 text-amber-400" />
             <h2 className="text-sm font-semibold text-white">
-              Consultar al Maestro de Taller (Resolución de Dudas Técnicas)
+              Sustitución de Logotipo y Marca de Agua con Trazos Vectoriales del Usuario
+            </h2>
+          </div>
+
+          <p className="text-xs text-neutral-400">
+            Si cuentas con el trazo vectorial (.svg, .ai, .eps) del logotipo o de la marca de agua original, cárgalos aquí. La IA sustituirá el elemento borroso de la foto por tu vector original con precisión milimétrica:
+          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Logo replacement slot */}
+            <div className="p-4 bg-neutral-950 rounded border border-neutral-800 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-neutral-200">
+                  Trazo de Logotipo Vectorial (.svg / .eps / .ai)
+                </span>
+                {userLogoVector && (
+                  <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                    <Check className="w-3 h-3" /> Cargado ({userLogoVector.elements.length} trazos)
+                  </span>
+                )}
+              </div>
+
+              <label className="border border-dashed border-neutral-700 hover:border-amber-500/60 rounded p-4 flex flex-col items-center justify-center cursor-pointer bg-neutral-900/50 transition-colors">
+                <Upload className="w-5 h-5 text-neutral-500 mb-1" />
+                <span className="text-xs text-neutral-300">
+                  {userLogoVector ? userLogoVector.name : 'Subir trazo de logotipo original'}
+                </span>
+                <span className="text-[10px] text-neutral-500 mt-0.5">
+                  Reemplaza el membrete rasterizado por curvas vectoriales
+                </span>
+                <input
+                  type="file"
+                  accept=".svg,.eps,.ai,.json"
+                  onChange={handleUserLogoUpload}
+                  className="hidden"
+                />
+              </label>
+            </div>
+
+            {/* Watermark replacement slot */}
+            <div className="p-4 bg-neutral-950 rounded border border-neutral-800 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-neutral-200">
+                  Vector de Marca de Agua (.svg / .eps / .ai)
+                </span>
+                {userWatermarkVector && (
+                  <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                    <Check className="w-3 h-3" /> Cargado ({userWatermarkVector.elements.length} trazos)
+                  </span>
+                )}
+              </div>
+
+              <label className="border border-dashed border-neutral-700 hover:border-amber-500/60 rounded p-4 flex flex-col items-center justify-center cursor-pointer bg-neutral-900/50 transition-colors">
+                <Upload className="w-5 h-5 text-neutral-500 mb-1" />
+                <span className="text-xs text-neutral-300">
+                  {userWatermarkVector ? userWatermarkVector.name : 'Subir vector de marca de agua'}
+                </span>
+                <span className="text-[10px] text-neutral-500 mt-0.5">
+                  Calibrado a 6% de tinta para evitar empaste en imprenta
+                </span>
+                <input
+                  type="file"
+                  accept=".svg,.eps,.ai,.json"
+                  onChange={handleUserWatermarkUpload}
+                  className="hidden"
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Section 5: Workshop Consultant Chat */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-5">
+          <div className="flex items-center gap-2 mb-2">
+            <Info className="w-4 h-4 text-amber-400" />
+            <h2 className="text-sm font-semibold text-white">
+              Consultor de Taller Gráfico & Separación de Color
             </h2>
           </div>
           <p className="text-xs text-neutral-400 mb-4">
-            Pregunta sobre números de malla de serigrafía (ej. 43T vs 120T), mezclas de tintas, prevención de emplastado o cálculo de pinzas mecánicas:
+            Resuelve dudas técnicas sobre mallas de serigrafía (ej. 43T para base blanca vs 120T para textos), separación de color por capas o ganancia de punto:
           </p>
 
           <form onSubmit={handleAskConsultant} className="flex gap-2">
@@ -885,7 +1279,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
               type="text"
               value={chatQuestion}
               onChange={(e) => setChatQuestion(e.target.value)}
-              placeholder="Ej: ¿Qué porcentaje de negro debe llevar una marca de agua para que no se emplaste en una offset pequeña?"
+              placeholder="Ej: ¿Cómo evitar que una marca de agua se empaste en serigrafía textil sobre playera oscura?"
               className="flex-1 bg-neutral-950 border border-neutral-700 text-neutral-100 text-xs rounded px-3 py-2 focus:outline-none focus:border-amber-500"
             />
             <button
@@ -902,14 +1296,14 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             </button>
           </form>
 
-          {/* Quick preset chips */}
+          {/* Preset buttons */}
           <div className="flex flex-wrap items-center gap-2 mt-3">
-            <span className="text-[11px] text-neutral-500">Consultas rápidas:</span>
+            <span className="text-[11px] text-neutral-500">Consultas frecuentes:</span>
             {[
-              '¿Por qué una marca de agua al 10% no queda bien en offset?',
-              '¿Cómo evitar emplaste de tipografías finas en serigrafía?',
-              '¿Dónde se coloca la pinza de 0.8 cm en una media carta apaisada?',
-              '¿Cómo calcular la compensación de lomo (creep) en una revista de 32 páginas?',
+              '¿Por qué los marcos de imprenta deben tener ángulos rectos de 90°?',
+              '¿Cómo preparar una separación de color para playera negra con base blanca?',
+              '¿Por qué las líneas de tablas deben ser trazos CAD y no polígonos rellenos?',
+              '¿Qué porcentaje de negro debe llevar una marca de agua para no tapar la firma?',
             ].map((q, idx) => (
               <button
                 key={idx}

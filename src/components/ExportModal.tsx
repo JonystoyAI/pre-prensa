@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { DocumentDimensions, InkColor, PrintSystem, VectorElement } from '../types/prepress';
 import { exportSeparatedSvg } from '../utils/colorSeparation';
 import { generatePrepressPdf, PdfExportOptions } from '../utils/pdfGenerator';
+import { exportToEps, exportToAi, exportToJsonProject } from '../utils/vectorExporters';
 import {
   X,
   Download,
@@ -12,6 +13,7 @@ import {
   FileType,
   Sparkles,
   Check,
+  Package,
 } from 'lucide-react';
 
 interface ExportModalProps {
@@ -113,7 +115,61 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     setTimeout(() => setDownloadSuccess(null), 3000);
   };
 
-  // 4. Export Technical Pre-Flight Job Ticket
+  // 4. Export Encapsulated PostScript (.eps)
+  const handleDownloadEps = () => {
+    try {
+      const epsData = exportToEps(doc, elements, inks);
+      const blob = new Blob([epsData], { type: 'application/postscript;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `pressforge_${doc.name.toLowerCase().replace(/[^a-z0-9]/g, '_')}_vectorial.eps`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setDownloadSuccess('Archivo EPS PostScript Nivel 3 con colores CMYK descargado.');
+      setTimeout(() => setDownloadSuccess(null), 3500);
+    } catch (err: any) {
+      alert('Error al generar archivo EPS: ' + err.message);
+    }
+  };
+
+  // 5. Export Adobe Illustrator compatible (.ai)
+  const handleDownloadAi = () => {
+    try {
+      const aiData = exportToAi(doc, elements, inks);
+      const blob = new Blob([aiData], { type: 'application/postscript;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `pressforge_${doc.name.toLowerCase().replace(/[^a-z0-9]/g, '_')}.ai`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setDownloadSuccess('Archivo compatible con Adobe Illustrator (.ai) descargado.');
+      setTimeout(() => setDownloadSuccess(null), 3500);
+    } catch (err: any) {
+      alert('Error al exportar AI: ' + err.message);
+    }
+  };
+
+  // 6. Export PressForge Native Project Backup (.json)
+  const handleDownloadJson = () => {
+    try {
+      const jsonData = exportToJsonProject(doc, elements, inks, printSystem);
+      const blob = new Blob([jsonData], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `pressforge_proyecto_${doc.name.toLowerCase().replace(/[^a-z0-9]/g, '_')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setDownloadSuccess('Proyecto PressForge (.json) exportado exitosamente.');
+      setTimeout(() => setDownloadSuccess(null), 3500);
+    } catch (err: any) {
+      alert('Error al exportar JSON: ' + err.message);
+    }
+  };
+
+  // 7. Export Technical Pre-Flight Job Ticket
   const handleDownloadJobTicket = () => {
     const activeInksList = inks.filter((i) => i.visible);
     const ticketContent = `=====================================================
@@ -343,6 +399,59 @@ Generado por PressForge Studio
                       <Download className="w-3 h-3 text-neutral-500 shrink-0 ml-1" />
                     </button>
                   ))}
+              </div>
+            </div>
+
+            {/* Option: Formatos Vectoriales de Intercambio (EPS, AI, JSON) */}
+            <div className="p-3 bg-neutral-950 rounded-lg border border-neutral-800 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 font-medium text-white">
+                  <FileCode className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Formatos Vectoriales de Intercambio & Copia de Seguridad</span>
+                </div>
+                <span className="text-[10px] font-mono text-neutral-400">
+                  .EPS · .AI · .JSON
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400 leading-snug">
+                Exporta el trabajo en formatos estándar para continuar la edición en Adobe Illustrator, CorelDRAW o respaldar el proyecto completo con tintas y cotas.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleDownloadEps}
+                  className="px-3 py-2 text-xs font-semibold bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 hover:border-amber-500/50 text-neutral-200 rounded flex items-center justify-between transition-colors"
+                >
+                  <div className="text-left">
+                    <span className="block font-mono text-amber-400">.EPS Vector</span>
+                    <span className="text-[10px] text-neutral-400 font-normal">PostScript Nivel 3</span>
+                  </div>
+                  <Download className="w-3.5 h-3.5 text-neutral-400" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadAi}
+                  className="px-3 py-2 text-xs font-semibold bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 hover:border-amber-500/50 text-neutral-200 rounded flex items-center justify-between transition-colors"
+                >
+                  <div className="text-left">
+                    <span className="block font-mono text-amber-400">.AI Illustrator</span>
+                    <span className="text-[10px] text-neutral-400 font-normal">Compatible CS/CC</span>
+                  </div>
+                  <Download className="w-3.5 h-3.5 text-neutral-400" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadJson}
+                  className="px-3 py-2 text-xs font-semibold bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 hover:border-amber-500/50 text-neutral-200 rounded flex items-center justify-between transition-colors"
+                >
+                  <div className="text-left">
+                    <span className="block font-mono text-emerald-400">.JSON Proyecto</span>
+                    <span className="text-[10px] text-neutral-400 font-normal">Copia de Seguridad</span>
+                  </div>
+                  <Package className="w-3.5 h-3.5 text-neutral-400" />
+                </button>
               </div>
             </div>
 

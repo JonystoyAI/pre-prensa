@@ -1,6 +1,6 @@
 import React from 'react';
 import { PrintSystem, DocumentDimensions } from '../types/prepress';
-import { Download, Sliders, AlertTriangle, Layers, Wand2, Grid, Sparkles } from 'lucide-react';
+import { Download, Sliders, AlertTriangle, Layers, Wand2, Grid, Sparkles, Upload } from 'lucide-react';
 
 interface TopBarProps {
   currentView: 'canvas' | 'separation' | 'imposition' | 'assistant';
@@ -11,6 +11,7 @@ interface TopBarProps {
   setDocument: (doc: DocumentDimensions) => void;
   alertCount: number;
   onOpenExport: () => void;
+  onOpenImport: () => void;
   onOpenVectorizer: () => void;
   onOpenFontUpload: () => void;
   onOpenEnhancer: () => void;
@@ -24,6 +25,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   document: doc,
   alertCount,
   onOpenExport,
+  onOpenImport,
   onOpenVectorizer,
   onOpenFontUpload,
   onOpenEnhancer,
@@ -127,6 +129,16 @@ export const TopBar: React.FC<TopBarProps> = ({
         >
           <Sparkles className="w-3.5 h-3.5 text-amber-400" />
           Realzar Imagen
+        </button>
+
+        {/* Import Files shortcut */}
+        <button
+          onClick={onOpenImport}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-neutral-200 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded transition-colors"
+          title="Importar archivos vectoriales (.ai, .eps, .cdr, .pdf, .svg) o imágenes (.png, .jpg)"
+        >
+          <Upload className="w-3.5 h-3.5 text-amber-400" />
+          <span>Importar</span>
         </button>
 
         {/* Vectorize Image shortcut */}

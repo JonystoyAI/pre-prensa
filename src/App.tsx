@@ -26,7 +26,8 @@ import { ExportModal } from './components/ExportModal';
 import { FontUploadModal } from './components/FontUploadModal';
 import { TemplateLibraryModal } from './components/TemplateLibraryModal';
 import { ImageEnhancerModal } from './components/ImageEnhancerModal';
-import { BookTemplate, RotateCcw, RotateCw, Layers, Palette } from 'lucide-react';
+import { ImportFileModal } from './components/ImportFileModal';
+import { BookTemplate, RotateCcw, RotateCw, Layers, Palette, Upload } from 'lucide-react';
 
 export default function App() {
   // Document setup: Media Carta Apaisada (21.5 × 14 cm) with 8mm mechanical gripper on top
@@ -66,6 +67,7 @@ export default function App() {
 
   // Modals state
   const [isExportOpen, setIsExportOpen] = useState(false);
+  const [isImportOpen, setIsImportOpen] = useState(false);
   const [isVectorizerOpen, setIsVectorizerOpen] = useState(false);
   const [isFontOpen, setIsFontOpen] = useState(false);
   const [isTemplateOpen, setIsTemplateOpen] = useState(false);
@@ -254,6 +256,39 @@ export default function App() {
     setCurrentView('canvas');
   };
 
+  // Import vector elements from files (.svg, .ai, .eps, .cdr, .pdf, .json)
+  const handleImportVectorElements = (
+    newEls: VectorElement[],
+    newInks: InkColor[],
+    replaceAll: boolean
+  ) => {
+    setInks((prev) => {
+      const merged = [...prev];
+      for (const ni of newInks) {
+        if (!merged.some((i) => i.id === ni.id)) {
+          merged.push(ni);
+        }
+      }
+      return merged;
+    });
+
+    if (replaceAll) {
+      setElements(newEls);
+      pushHistory(newEls);
+    } else {
+      const combined = [...elements, ...newEls];
+      setElements(combined);
+      pushHistory(combined);
+    }
+    setCurrentView('canvas');
+  };
+
+  // Route bitmap image from importer to vectorizer
+  const handleOpenVectorizerWithImage = (imageSrc: string, fileName: string) => {
+    setVectorizerInitialImage(imageSrc);
+    setIsVectorizerOpen(true);
+  };
+
   // Load template
   const handleLoadTemplate = (
     templateDoc: DocumentDimensions,
@@ -280,6 +315,7 @@ export default function App() {
         setDocument={setDoc}
         alertCount={alerts.length}
         onOpenExport={() => setIsExportOpen(true)}
+        onOpenImport={() => setIsImportOpen(true)}
         onOpenVectorizer={() => setIsVectorizerOpen(true)}
         onOpenFontUpload={() => setIsFontOpen(true)}
         onOpenEnhancer={() => setIsEnhancerOpen(true)}
@@ -308,6 +344,15 @@ export default function App() {
               >
                 <BookTemplate className="w-3.5 h-3.5" />
                 Plantillas de Taller
+              </button>
+
+              <button
+                onClick={() => setIsImportOpen(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-sky-300 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 rounded transition-colors"
+                title="Importar archivos vectoriales (.ai, .eps, .cdr, .pdf, .svg) o imágenes (.png, .jpg)"
+              >
+                <Upload className="w-3.5 h-3.5 text-sky-400" />
+                Importar Archivo
               </button>
 
               <div className="h-4 w-px bg-neutral-800" />
@@ -486,6 +531,17 @@ export default function App() {
       </div>
 
       {/* Modals */}
+      <ImportFileModal
+        isOpen={isImportOpen}
+        onClose={() => setIsImportOpen(false)}
+        document={doc}
+        setDocument={setDoc}
+        inks={inks}
+        setInks={setInks}
+        onImportVectorElements={handleImportVectorElements}
+        onOpenVectorizerWithImage={handleOpenVectorizerWithImage}
+      />
+
       <VectorizerModal
         isOpen={isVectorizerOpen}
         onClose={() => setIsVectorizerOpen(false)}

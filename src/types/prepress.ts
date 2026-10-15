@@ -62,6 +62,7 @@ export interface VectorElement {
   height: number; // mm
   rotationDeg: number;
   // Path specifics
+  pathData?: string; // Ruta SVG nativa (d="M ... C ... Z")
   nodes?: BezierNode[];
   closed?: boolean;
   // Styling
@@ -163,6 +164,20 @@ export interface NoteAnalysisResult {
     suggestedWatermarkOpacityPercent: number;
     gripperMarginMm: number;
     warningMessage?: string;
+  };
+  substrate?: 'papel_comercial' | 'playera_textil' | 'vinil_corte' | 'cartulina';
+  inkSeparationSuggestion?: {
+    inkCount: number;
+    inkNames: string[];
+    underbaseNeeded?: boolean;
+    meshRecommendation?: string;
+  };
+  logoZone?: { xMm: number; yMm: number; widthMm: number; heightMm: number };
+  watermarkZone?: { xMm: number; yMm: number; widthMm: number; heightMm: number };
+  borderFrame?: {
+    isOrthogonal: boolean;
+    deviationAngleDeg: number;
+    detectedRect: { xMm: number; yMm: number; widthMm: number; heightMm: number };
   };
   detectedFonts: Array<{
     category: string;

@@ -73,6 +73,7 @@ export const VectorCanvas: React.FC<VectorCanvasProps> = ({
   setSelectedElementId,
   viewMode,
   isolatedInkId,
+  onElementsChange,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -1611,18 +1612,39 @@ export const VectorCanvas: React.FC<VectorCanvasProps> = ({
                 );
               }
 
-              if (el.type === 'path' && el.nodes && el.nodes.length > 0) {
-                let d = `M ${el.nodes[0].x} ${el.nodes[0].y}`;
-                for (let i = 1; i < el.nodes.length; i++) {
-                  const curr = el.nodes[i];
-                  const prev = el.nodes[i - 1];
-                  if (prev.handleOut && curr.handleIn) {
-                    d += ` C ${prev.handleOut.x} ${prev.handleOut.y}, ${curr.handleIn.x} ${curr.handleIn.y}, ${curr.x} ${curr.y}`;
-                  } else {
-                    d += ` L ${curr.x} ${curr.y}`;
+              if (el.type === 'line') {
+                return (
+                  <line
+                    key={el.id}
+                    x1={el.x}
+                    y1={el.y}
+                    x2={el.x + el.width}
+                    y2={el.y + el.height}
+                    stroke={renderStroke}
+                    strokeWidth={isSelected ? Math.max(0.4, el.strokeWidthMm) : el.strokeWidthMm}
+                    strokeDasharray={el.strokeDashArray}
+                    onMouseDown={(e) => handleElementMouseDown(e, el)}
+                    className="cursor-pointer"
+                  />
+                );
+              }
+
+              if (el.type === 'path') {
+                let d = el.pathData || '';
+                if (!d && el.nodes && el.nodes.length > 0) {
+                  d = `M ${el.nodes[0].x} ${el.nodes[0].y}`;
+                  for (let i = 1; i < el.nodes.length; i++) {
+                    const curr = el.nodes[i];
+                    const prev = el.nodes[i - 1];
+                    if (prev.handleOut && curr.handleIn) {
+                      d += ` C ${prev.handleOut.x} ${prev.handleOut.y}, ${curr.handleIn.x} ${curr.handleIn.y}, ${curr.x} ${curr.y}`;
+                    } else {
+                      d += ` L ${curr.x} ${curr.y}`;
+                    }
                   }
+                  if (el.closed) d += ' Z';
                 }
-                if (el.closed) d += ' Z';
+                if (!d) return null;
                 return (
                   <path
                     key={el.id}
@@ -1630,7 +1652,8 @@ export const VectorCanvas: React.FC<VectorCanvasProps> = ({
                     fill={renderFill}
                     fillOpacity={el.fillOpacity}
                     stroke={renderStroke}
-                    strokeWidth={el.strokeWidthMm}
+                    strokeWidth={isSelected ? Math.max(0.4, el.strokeWidthMm) : el.strokeWidthMm}
+                    strokeDasharray={el.strokeDashArray}
                     onMouseDown={(e) => handleElementMouseDown(e, el)}
                     className="cursor-pointer"
                   />

@@ -614,19 +614,24 @@ export function exportSeparatedSvg(
       svgTag = `<g class="marca-de-agua" opacity="${el.fillOpacity}">
         <text x="${el.x}" y="${el.y}" font-family="${el.fontFamily || 'sans-serif'}" font-size="12mm" font-weight="bold" fill="${fillVal}">${escapeXml(el.text || 'ORIGINAL')}</text>
       </g>`;
-    } else if (el.type === 'path' && el.nodes && el.nodes.length > 0) {
-      let d = `M ${el.nodes[0].x} ${el.nodes[0].y}`;
-      for (let i = 1; i < el.nodes.length; i++) {
-        const curr = el.nodes[i];
-        const prev = el.nodes[i - 1];
-        if (prev.handleOut && curr.handleIn) {
-          d += ` C ${prev.handleOut.x} ${prev.handleOut.y}, ${curr.handleIn.x} ${curr.handleIn.y}, ${curr.x} ${curr.y}`;
-        } else {
-          d += ` L ${curr.x} ${curr.y}`;
+    } else if (el.type === 'path') {
+      let d = el.pathData || '';
+      if (!d && el.nodes && el.nodes.length > 0) {
+        d = `M ${el.nodes[0].x} ${el.nodes[0].y}`;
+        for (let i = 1; i < el.nodes.length; i++) {
+          const curr = el.nodes[i];
+          const prev = el.nodes[i - 1];
+          if (prev.handleOut && curr.handleIn) {
+            d += ` C ${prev.handleOut.x} ${prev.handleOut.y}, ${curr.handleIn.x} ${curr.handleIn.y}, ${curr.x} ${curr.y}`;
+          } else {
+            d += ` L ${curr.x} ${curr.y}`;
+          }
         }
+        if (el.closed) d += ' Z';
       }
-      if (el.closed) d += ' Z';
-      svgTag = `<path d="${d}" fill="${fillVal}" fill-opacity="${el.fillOpacity}" stroke="${strokeVal}" stroke-width="${el.strokeWidthMm}" />`;
+      if (d) {
+        svgTag = `<path d="${d}" fill="${fillVal}" fill-opacity="${el.fillOpacity}" stroke="${strokeVal}" stroke-width="${el.strokeWidthMm}" />`;
+      }
     }
 
     if (svgTag) {

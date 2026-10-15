@@ -132,3 +132,166 @@ function applyUnsharpMask(
 
   return output;
 }
+
+// 4. Super-Resolución real a 300 DPI para pre-prensa
+// Calcula píxeles exactos a partir de dimensiones milimétricas: px = (mm / 25.4) * 300
+export function upscaleTo300Dpi(
+  sourceImage: HTMLImageElement | HTMLCanvasElement,
+  widthMm: number,
+  heightMm: number
+): HTMLCanvasElement {
+  const targetW = Math.round((widthMm / 25.4) * 300);
+  const targetH = Math.round((heightMm / 25.4) * 300);
+
+  // Limitar a dimensiones seguras para memoria de navegador (máx 3600px)
+  const maxDim = 3600;
+  const factor = Math.min(1.0, maxDim / Math.max(targetW, targetH));
+  const finalW = Math.round(targetW * factor);
+  const finalH = Math.round(targetH * factor);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = finalW;
+  canvas.height = finalH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return canvas;
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(sourceImage, 0, 0, finalW, finalH);
+
+  // Aplicar filtro de nitidez quirúrgico para retener bordes de texto y líneas finas
+  const sharpened = applyUnsharpMask(ctx, finalW, finalH, 2.5);
+  ctx.putImageData(sharpened, 0, 0);
+
+  return canvas;
+}
+
+// 5. Reparación morfológica de líneas mordidas y eliminación de ruido (despeckle)
+export function repairBrokenLinesAndDenoise(
+  sourceCanvas: HTMLCanvasElement,
+  gapRepairThreshold: number = 3
+): HTMLCanvasElement {
+  const width = sourceCanvas.width;
+  const height = sourceCanvas.height;
+  const ctx = sourceCanvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return sourceCanvas;
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = width;
+  outCanvas.height = height;
+  const outCtx = outCanvas.getContext('2d', { willReadFrequently: true });
+  if (!outCtx) return sourceCanvas;
+
+  const src = ctx.getImageData(0, 0, width, height);
+  const data = src.data;
+  const out = outCtx.createImageData(width, height);
+  const outData = out.data;
+
+  // Paso A: Binarización adaptativa para separar tinta de papel
+  const isInk = new Uint8Array(width * height);
+  for (let i = 0; i < data.length; i += 4) {
+    const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    isInk[i / 4] = lum < 165 ? 1 : 0;
+  }
+
+  // Paso B: Cierre morfológico 1D horizontal y vertical (conecta líneas discontinuas o mordidas)
+  const closedInk = new Uint8Array(isInk);
+  const maxGap = Math.max(1, Math.min(6, gapRepairThreshold));
+
+  // Cierre horizontal para renglones
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * width;
+    let lastInkX = -100;
+    for (let x = 0; x < width; x++) {
+      if (isInk[rowOffset + x]) {
+        if (lastInkX >= 0 && x - lastInkX <= maxGap) {
+          for (let fillX = lastInkX + 1; fillX < x; fillX++) {
+            closedInk[rowOffset + fillX] = 1;
+          }
+        }
+        lastInkX = x;
+      }
+    }
+  }
+
+  // Cierre vertical para columnas y marcos
+  for (let x = 0; x < width; x++) {
+    let lastInkY = -100;
+    for (let y = 0; y < height; y++) {
+      const idx = y * width + x;
+      if (isInk[idx]) {
+        if (lastInkY >= 0 && y - lastInkY <= maxGap) {
+          for (let fillY = lastInkY + 1; fillY < y; fillY++) {
+            closedInk[fillY * width + x] = 1;
+          }
+        }
+        lastInkY = y;
+      }
+    }
+  }
+
+  // Escribir imagen limpia con fondo blanco y trazos negros de alta densidad
+  for (let i = 0; i < isInk.length; i++) {
+    const idx = i * 4;
+    if (closedInk[i]) {
+      outData[idx] = 17;     // Tinta sólida nítida
+      outData[idx + 1] = 24;
+      outData[idx + 2] = 39;
+      outData[idx + 3] = 255;
+    } else {
+      outData[idx] = 255;    // Papel 100% limpio
+      outData[idx + 1] = 255;
+      outData[idx + 2] = 255;
+      outData[idx + 3] = 255;
+    }
+  }
+
+  outCtx.putImageData(out, 0, 0);
+  return outCanvas;
+}
+
+// 6. Análisis de ángulo y desviación ortogonal a 90° de las esquinas
+export function calculateCornerDeviations(corners: { x: number; y: number }[]): {
+  isOrthogonal: boolean;
+  maxAngleDeviationDeg: number;
+  cornerAnglesDeg: [number, number, number, number];
+} {
+  if (corners.length < 4) {
+    return { isOrthogonal: true, maxAngleDeviationDeg: 0, cornerAnglesDeg: [90, 90, 90, 90] };
+  }
+
+  // Helper para calcular ángulo entre 3 puntos (B es vértice)
+  const angleBetween = (
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+    c: { x: number; y: number }
+  ) => {
+    const v1 = { x: a.x - b.x, y: a.y - b.y };
+    const v2 = { x: c.x - b.x, y: c.y - b.y };
+    const dot = v1.x * v2.x + v1.y * v2.y;
+    const mag1 = Math.hypot(v1.x, v1.y);
+    const mag2 = Math.hypot(v2.x, v2.y);
+    if (mag1 === 0 || mag2 === 0) return 90;
+    const cosAngle = Math.max(-1, Math.min(1, dot / (mag1 * mag2)));
+    return (Math.acos(cosAngle) * 180) / Math.PI;
+  };
+
+  const a0 = Math.round(angleBetween(corners[3], corners[0], corners[1]) * 10) / 10;
+  const a1 = Math.round(angleBetween(corners[0], corners[1], corners[2]) * 10) / 10;
+  const a2 = Math.round(angleBetween(corners[1], corners[2], corners[3]) * 10) / 10;
+  const a3 = Math.round(angleBetween(corners[2], corners[3], corners[0]) * 10) / 10;
+
+  const deviations = [
+    Math.abs(a0 - 90),
+    Math.abs(a1 - 90),
+    Math.abs(a2 - 90),
+    Math.abs(a3 - 90),
+  ];
+
+  const maxDev = Math.round(Math.max(...deviations) * 10) / 10;
+  return {
+    isOrthogonal: maxDev <= 2.0,
+    maxAngleDeviationDeg: maxDev,
+    cornerAnglesDeg: [a0, a1, a2, a3],
+  };
+}
