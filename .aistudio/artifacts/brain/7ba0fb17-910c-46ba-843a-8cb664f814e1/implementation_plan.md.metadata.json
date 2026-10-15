@@ -1,0 +1,6 @@
+{
+  "summary": "Plan de implementación para PressForge Studio: estación de trabajo de pre-prensa y diseño vectorial técnico para talleres de impresión (offset, serigrafía, flexografía, huecograbado, vinil) y diseñadores independientes. Incluye motor vectorial estilo Illustrator/CorelDRAW, separador de tintas (CMYK y tintas planas spot Pantone), reglas de taller (pinza de 0.8 cm, marcas de agua seguras al 4-8%, advertencia de emplaste en serigrafía para textos <8pt), vectorizador de imágenes por capas de color, asistente IA para fotos oblicuas con corrección de perspectiva homográfica e imposición de pliegos (2 y 4 al tiro con cruces de registro).",
+  "updatedAt": "2026-10-14T05:56:38.535129698Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

@@ -1,0 +1,6 @@
+{
+  "name": "PressForge Studio — Pre-Prensa Vectorial & Taller",
+  "description": "Software de diseño vectorial y pre-prensa para imprentas: separación de color CMYK y tintas planas, pinzas de máquina de 0.8 cm, detección IA de notas de venta distorsionadas y armado de pliegos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
